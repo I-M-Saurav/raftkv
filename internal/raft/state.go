@@ -54,6 +54,19 @@ type State struct {
 	NodeID       int       // this node's own ID
 }
 
+// LastLogIndex returns the index of the last entry currently in the log.
+// Because Log[0] is a dummy sentinel, an "empty" log (no real entries yet)
+// correctly returns 0 here — which is exactly what §5.4.1's comparison expects.
+func (s *State) LastLogIndex() int {
+	return len(s.Log) - 1
+}
+
+// LastLogTerm returns the term of the last entry currently in the log.
+// Used alongside LastLogIndex in the §5.4.1 "up-to-date" check during voting.
+func (s *State) LastLogTerm() int {
+	return s.Log[s.LastLogIndex()].Term
+}
+
 // NewState creates a fresh Raft state for a node starting up for the first time.
 // Note: Log[0] is a dummy/sentinel entry so that real entries start at index 1,
 // matching the paper's 1-indexed convention and avoiding off-by-one bugs later.
