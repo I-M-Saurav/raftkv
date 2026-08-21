@@ -1,0 +1,33 @@
+# Compiled binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Go build/test artifacts
+*.test
+*.out
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Raft WAL / persisted data (added in Phase 6 — data dirs shouldn't be committed)
+/data/
+*.wal
+*.db
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Env files (if we add config secrets later)
+.env
