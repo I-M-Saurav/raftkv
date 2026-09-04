@@ -1,0 +1,10 @@
+# Raft cluster configuration.
+# Each node needs a unique ID and a gRPC address (host:port) for inter-node RPCs.
+# The HTTP client-facing port is separate and passed via command-line flag.
+nodes:
+  - id: 1
+    address: "localhost:9001"
+  - id: 2
+    address: "localhost:9002"
+  - id: 3
+    address: "localhost:9003"
