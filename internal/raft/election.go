@@ -2,12 +2,10 @@ package raft
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand/v2"
 	"time"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"raftkv/internal/raftpb"
 )
@@ -39,7 +37,7 @@ func randomElectionTimeout() time.Duration {
 //
 // These events send on state.ResetElectionTimerCh. A shutdown signal on
 // state.StopCh terminates the goroutine cleanly.
-func RunElectionTimer(state *State) {
+func RunElectionTimer(state *State, peerPool *PeerConnections) {
 	timer := time.NewTimer(randomElectionTimeout())
 	defer timer.Stop()
 
@@ -62,7 +60,7 @@ func RunElectionTimer(state *State) {
 			//      the new startElection will increment the term further. The old
 			//      election's stale-term guards (electionTerm != state.CurrentTerm)
 			//      will cause it to discard any late-arriving votes harmlessly.
-			go startElection(state)
+			go startElection(state, peerPool)
 
 			// Reset the timer immediately for the next round. If the election
 			// completes and we become Leader, startElection checks CurrentState
@@ -134,7 +132,7 @@ func notifyStepDown(state *State) {
 // reached, we transition to Leader immediately without waiting for stragglers.
 // If any peer reports a higher term, we step down to Follower and abandon
 // the election (Figure 2, "Rules for Servers → All Servers").
-func startElection(state *State) {
+func startElection(state *State, peerPool *PeerConnections) {
 	state.Lock()
 
 	// If we're already a Leader, don't start an election. This can happen if
@@ -191,22 +189,15 @@ func startElection(state *State) {
 
 	for _, peer := range peers {
 		go func(peerAddr string, peerID int64) {
-			// Dial the peer with a timeout. For Phase 3 we dial per request;
-			// persistent connections are a Phase 4+ optimization.
+			client, ok := peerPool.Client(peerID)
+			if !ok {
+				voteCh <- voteResult{peerID: peerID, err: fmt.Errorf("no persistent client for peer %d", peerID)}
+				return
+			}
+
 			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 
-			conn, err := grpc.DialContext(ctx, peerAddr,
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpc.WithBlock(),
-			)
-			if err != nil {
-				voteCh <- voteResult{peerID: peerID, err: err}
-				return
-			}
-			defer conn.Close()
-
-			client := raftpb.NewRaftServiceClient(conn)
 			resp, err := client.RequestVote(ctx, &raftpb.RequestVoteRequest{
 				Term:         int64(electionTerm),
 				CandidateId:  int64(nodeID),

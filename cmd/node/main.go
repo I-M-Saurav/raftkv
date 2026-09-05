@@ -36,7 +36,11 @@ func main() {
 
 	// ── Initialize Raft ─────────────────────────────────────────────────
 	state := raft.NewState(*nodeID, peers)
-	node := raft.NewRaftNode(state, *raftAddr)
+	node, err := raft.NewRaftNode(state, *raftAddr)
+	if err != nil {
+		log.Fatalf("[Node %d] failed to initialize Raft: %v", *nodeID, err)
+	}
+	defer node.Close()
 	node.Start() // launches gRPC server, election timer, and supervisor goroutines
 
 	log.Printf("[Node %d] Raft started (raft-addr=%s)", *nodeID, *raftAddr)

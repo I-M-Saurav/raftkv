@@ -5,9 +5,6 @@ import (
 	"log"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
 	"raftkv/internal/raftpb"
 )
 
@@ -22,16 +19,22 @@ type RaftNode struct {
 	State      *State
 	listenAddr string    // gRPC listen address (e.g. "localhost:9001")
 	rpcServer  *RPCServer
+	peerPool   *PeerConnections
 }
 
-// NewRaftNode constructs a RaftNode. It creates the RPCServer internally —
-// the caller only needs to provide the shared State and the gRPC listen address.
-func NewRaftNode(state *State, listenAddr string) *RaftNode {
+// NewRaftNode constructs a RaftNode. It creates the RPCServer internally and
+// eagerly initializes persistent gRPC client connections to all peers.
+func NewRaftNode(state *State, listenAddr string) (*RaftNode, error) {
+	peerPool, err := NewPeerConnections(state.Peers)
+	if err != nil {
+		return nil, err
+	}
 	return &RaftNode{
 		State:      state,
 		listenAddr: listenAddr,
 		rpcServer:  NewRPCServer(state),
-	}
+		peerPool:   peerPool,
+	}, nil
 }
 
 // Start launches all the background goroutines that make this node a
@@ -52,11 +55,18 @@ func (rn *RaftNode) Start() {
 		}
 	}()
 
-	// 2. Start the election timer goroutine.
-	go RunElectionTimer(rn.State)
+	// 2. Start the election timer goroutine with persistent peer connections.
+	go RunElectionTimer(rn.State, rn.peerPool)
 
 	// 3. Start the leadership supervisor goroutine.
 	go rn.runSupervisor()
+}
+
+// Close terminates all persistent gRPC peer connections.
+func (rn *RaftNode) Close() {
+	if rn.peerPool != nil {
+		rn.peerPool.Close()
+	}
 }
 
 // runSupervisor manages the heartbeat goroutine lifecycle. It selects on
@@ -107,7 +117,7 @@ func (rn *RaftNode) runSupervisor() {
 			log.Printf("[Node %d] supervisor: spawning heartbeat goroutine for term %d", rn.State.NodeID, term)
 			go func(t int, stopCh <-chan struct{}, done chan<- struct{}) {
 				defer close(done)
-				sendHeartbeats(rn.State, t, stopCh)
+				sendHeartbeats(rn.State, t, rn.peerPool, stopCh)
 			}(term, stopHeartbeatCh, heartbeatDone)
 
 		case <-rn.State.StepDownCh:
@@ -118,8 +128,9 @@ func (rn *RaftNode) runSupervisor() {
 			}
 
 		case <-rn.State.StopCh:
-			// Shutdown. Stop heartbeats if running and exit.
+			// Shutdown. Stop heartbeats if running, close peer connections, and exit.
 			stopHeartbeat()
+			rn.peerPool.Close()
 			log.Printf("[Node %d] supervisor: shutting down", rn.State.NodeID)
 			return
 		}
@@ -144,7 +155,7 @@ func (rn *RaftNode) runSupervisor() {
 //   - state.StopCh is closed (node shutdown)
 //   - a peer response reveals a higher term (self-initiated step-down)
 //   - state.CurrentState != Leader or state.CurrentTerm != term (demoted or term changed)
-func sendHeartbeats(state *State, term int, stopCh <-chan struct{}) {
+func sendHeartbeats(state *State, term int, peerPool *PeerConnections, stopCh <-chan struct{}) {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -167,25 +178,17 @@ func sendHeartbeats(state *State, term int, stopCh <-chan struct{}) {
 			commitIndex := state.CommitIndex
 			state.Unlock()
 
-			// Send empty AppendEntries to all peers concurrently.
-			// Same goroutine-per-peer pattern as startElection's RequestVote fan-out.
+			// Send empty AppendEntries to all peers concurrently over persistent connections.
 			for _, peer := range peers {
 				go func(peerAddr string, peerID int64) {
+					client, ok := peerPool.Client(peerID)
+					if !ok {
+						return
+					}
+
 					ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 					defer cancel()
 
-					conn, err := grpc.DialContext(ctx, peerAddr,
-						grpc.WithTransportCredentials(insecure.NewCredentials()),
-						grpc.WithBlock(),
-					)
-					if err != nil {
-						// Peer is down — not fatal, it will rejoin later.
-						// Don't log every failure at 50ms intervals to avoid log spam.
-						return
-					}
-					defer conn.Close()
-
-					client := raftpb.NewRaftServiceClient(conn)
 					resp, err := client.AppendEntries(ctx, &raftpb.AppendEntriesRequest{
 						Term:         int64(currentTerm),
 						LeaderId:     int64(nodeID),
