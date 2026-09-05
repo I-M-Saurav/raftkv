@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sync"
 
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -23,8 +22,8 @@ import (
 type RPCServer struct {
 	raftpb.UnimplementedRaftServiceServer // forward-compatibility per gRPC convention
 
-	state *State     // shared Raft state — same instance used by election.go and raft.go
-	mu    sync.Mutex // guards all access to state; will move to RaftNode in raft.go later
+	state *State // shared Raft state — same instance used by election.go and raft.go
+	             // Locking is handled by state.Lock()/Unlock(); RPCServer has no mutex of its own.
 }
 
 // NewRPCServer creates an RPCServer that operates on the given shared State.
@@ -50,8 +49,8 @@ func NewRPCServer(state *State) *RPCServer {
 //	resp := HandleRequestVote(s.state, req)
 //	return resp, nil
 func (s *RPCServer) RequestVote(ctx context.Context, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.state.Lock()
+	defer s.state.Unlock()
 
 	log.Printf("[Node %d] received RequestVote from candidate %d (term=%d) — STUB: denying",
 		s.state.NodeID, req.CandidateId, req.Term)
@@ -77,8 +76,8 @@ func (s *RPCServer) RequestVote(ctx context.Context, req *raftpb.RequestVoteRequ
 //	resp := HandleAppendEntries(s.state, req)
 //	return resp, nil
 func (s *RPCServer) AppendEntries(ctx context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.state.Lock()
+	defer s.state.Unlock()
 
 	log.Printf("[Node %d] received AppendEntries from leader %d (term=%d, entries=%d) — STUB: rejecting",
 		s.state.NodeID, req.LeaderId, req.Term, len(req.Entries))

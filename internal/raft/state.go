@@ -1,5 +1,7 @@
 package raft
 
+import "sync"
+
 // NodeState represents which of the 3 roles (§5.1) this node currently plays.
 type NodeState int
 
@@ -35,7 +37,15 @@ type LogEntry struct {
 // State holds all the Raft-specific state for a single node, matching
 // Figure 2 of the paper exactly. This is separate from the KV store —
 // Raft doesn't know what's being replicated, it just manages consensus.
+//
+// State embeds its own mutex (mu) — this is the single source-of-truth lock
+// for ALL concurrent access to Raft state, whether from rpc.go's gRPC
+// handlers, election.go's timer/heartbeat goroutines, or any future callers.
+// Callers use the exported Lock()/Unlock() methods; the mu field itself is
+// unexported to prevent external packages from bypassing the API.
 type State struct {
+	mu sync.Mutex // protects all fields below; access via Lock()/Unlock()
+
 	// --- Persistent state (must survive crash — written to disk in Phase 6) ---
 	CurrentTerm int        // latest term this node has seen (starts at 0, increases monotonically)
 	VotedFor    int        // candidateId voted for in CurrentTerm, or -1 if none
@@ -53,6 +63,14 @@ type State struct {
 	CurrentState NodeState // Follower / Candidate / Leader
 	NodeID       int       // this node's own ID
 }
+
+// Lock acquires the State mutex. Every goroutine that reads or writes Raft
+// state (gRPC handlers, election timer, heartbeat loop, etc.) must hold this
+// lock. Exposed as a method so the unexported mu field stays encapsulated.
+func (s *State) Lock()   { s.mu.Lock() }
+
+// Unlock releases the State mutex.
+func (s *State) Unlock() { s.mu.Unlock() }
 
 // LastLogIndex returns the index of the last entry currently in the log.
 // Because Log[0] is a dummy sentinel, an "empty" log (no real entries yet)
