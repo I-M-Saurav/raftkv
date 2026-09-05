@@ -105,6 +105,19 @@ func resetElectionTimer(state *State) {
 	}
 }
 
+// notifyStepDown performs a non-blocking send on state.StepDownCh to signal
+// raft.go's supervisor that this node has stepped down FROM Leader. The
+// supervisor uses this to stop the heartbeat-sending goroutine.
+//
+// CALLER MUST HOLD state.Lock(). Only call this when the node WAS Leader
+// before the transition — Candidate/Follower step-downs should NOT signal here.
+func notifyStepDown(state *State) {
+	select {
+	case state.StepDownCh <- struct{}{}:
+	default:
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Leader Election — Candidate Logic
 // ─────────────────────────────────────────────────────────────────────────────
@@ -239,11 +252,15 @@ func startElection(state *State) {
 		if result.term > int64(electionTerm) {
 			state.Lock()
 			if result.term > int64(state.CurrentTerm) {
+				wasLeader := state.CurrentState == Leader
 				log.Printf("[Node %d] peer %d has higher term %d (ours: %d) — stepping down",
 					nodeID, result.peerID, result.term, state.CurrentTerm)
 				state.CurrentTerm = int(result.term)
 				state.VotedFor = -1
 				state.CurrentState = Follower
+				if wasLeader {
+					notifyStepDown(state)
+				}
 			}
 			state.Unlock()
 			return // abandon this election
@@ -287,10 +304,8 @@ func startElection(state *State) {
 //
 // CALLER MUST HOLD state.Lock().
 //
-// NOTE: This does NOT start sending heartbeats. Heartbeat sending is the
-// responsibility of raft.go's orchestration goroutine (next phase). For now
-// we just set the state — the timer goroutine will keep running but
-// startElection short-circuits if CurrentState == Leader.
+// After setting the state and initializing nextIndex/matchIndex, it signals
+// BecameLeaderCh so that raft.go's supervisor can spawn the heartbeat goroutine.
 func becomeLeader(state *State) {
 	state.CurrentState = Leader
 
@@ -301,6 +316,14 @@ func becomeLeader(state *State) {
 	for _, peer := range state.Peers {
 		state.NextIndex[int(peer.ID)] = nextIdx
 		state.MatchIndex[int(peer.ID)] = 0
+	}
+
+	// Signal raft.go's supervisor to start sending heartbeats.
+	// Non-blocking: if a previous signal hasn't been consumed yet (shouldn't
+	// happen normally), we don't block — the supervisor will still process it.
+	select {
+	case state.BecameLeaderCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -346,11 +369,15 @@ func HandleRequestVote(state *State, req *raftpb.RequestVoteRequest) *raftpb.Req
 	// reject — even though we've never voted in term 5. With step-down-first,
 	// we update to term 5, set VotedFor=-1, then correctly evaluate the vote.
 	if int(req.Term) > state.CurrentTerm {
+		wasLeader := state.CurrentState == Leader
 		log.Printf("[Node %d] RequestVote from candidate %d has higher term %d > %d — stepping down to Follower before evaluating (§5.1)",
 			state.NodeID, req.CandidateId, req.Term, state.CurrentTerm)
 		state.CurrentTerm = int(req.Term)
 		state.VotedFor = -1
 		state.CurrentState = Follower
+		if wasLeader {
+			notifyStepDown(state)
+		}
 	}
 
 	// ── Figure 2, RequestVote RPC, rule 2 (first part): ─────────────────
@@ -460,13 +487,18 @@ func HandleAppendEntries(state *State, req *raftpb.AppendEntriesRequest) *raftpb
 	// as the candidate's current term, then the candidate recognizes the
 	// leader as legitimate and returns to follower state.").
 	if int(req.Term) > state.CurrentTerm {
+		wasLeader := state.CurrentState == Leader
 		log.Printf("[Node %d] AppendEntries from leader %d has higher term %d > %d — updating term, stepping down (§5.1)",
 			state.NodeID, req.LeaderId, req.Term, state.CurrentTerm)
 		state.CurrentTerm = int(req.Term)
 		state.VotedFor = -1
 		state.CurrentState = Follower
+		if wasLeader {
+			notifyStepDown(state)
+		}
 	} else if state.CurrentState == Candidate {
-		// Same term, but a leader exists — step down.
+		// Same term, but a leader exists — step down. NOT a leader demotion,
+		// so we do NOT signal StepDownCh (no heartbeat goroutine to stop).
 		log.Printf("[Node %d] AppendEntries from leader %d in same term %d — stepping down from Candidate to Follower (§5.2)",
 			state.NodeID, req.LeaderId, req.Term)
 		state.CurrentState = Follower

@@ -72,8 +72,20 @@ type State struct {
 	// a fresh random timeout. Sent on (non-blocking) when: a valid heartbeat
 	// arrives, this node grants a vote, or this node starts a new election.
 	ResetElectionTimerCh chan struct{}
-	// StopCh is closed once at shutdown to terminate the election timer goroutine.
+	// StopCh is closed once at shutdown to terminate the election timer goroutine
+	// and the heartbeat loop.
 	StopCh chan struct{}
+
+	// --- Leadership lifecycle channels (used by raft.go's supervisor) ---
+	// BecameLeaderCh is signalled (non-blocking) by becomeLeader() after this
+	// node wins an election. The supervisor in raft.go selects on this to
+	// spawn the heartbeat-sending goroutine.
+	BecameLeaderCh chan struct{}
+	// StepDownCh is signalled (non-blocking) when this node transitions FROM
+	// Leader TO Follower (higher term discovered). The supervisor selects on
+	// this to stop the heartbeat goroutine. Only sent when the node WAS Leader
+	// before the transition — Candidate/Follower step-downs do not signal here.
+	StepDownCh chan struct{}
 
 	// --- Cluster membership ---
 	// Peers holds the addresses of all OTHER nodes in the cluster (excluding self).
@@ -119,6 +131,8 @@ func NewState(nodeID int, peers []config.NodeConfig) *State {
 		NodeID:               nodeID,
 		ResetElectionTimerCh: make(chan struct{}, 1), // buffered(1) so non-blocking send never drops if timer goroutine is busy
 		StopCh:               make(chan struct{}),
+		BecameLeaderCh:       make(chan struct{}, 1),
+		StepDownCh:           make(chan struct{}, 1),
 		Peers:                peers,
 	}
 }
