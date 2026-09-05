@@ -5,7 +5,7 @@ import "testing"
 // TestNewState_InitialValues checks that a freshly created node starts in
 // the state §5.1 mandates: term 0, no vote cast, Follower role.
 func TestNewState_InitialValues(t *testing.T) {
-	s := NewState(1)
+	s := NewState(1, nil)
 
 	if s.CurrentTerm != 0 {
 		t.Errorf("expected CurrentTerm 0, got %d", s.CurrentTerm)
@@ -21,7 +21,7 @@ func TestNewState_InitialValues(t *testing.T) {
 // TestLastLogIndex_EmptyLog checks the dummy-entry trick: a log with no real
 // entries yet should report LastLogIndex 0, not -1 or a panic.
 func TestLastLogIndex_EmptyLog(t *testing.T) {
-	s := NewState(1)
+	s := NewState(1, nil)
 
 	if got := s.LastLogIndex(); got != 0 {
 		t.Errorf("expected LastLogIndex 0 for empty log, got %d", got)
@@ -35,7 +35,7 @@ func TestLastLogIndex_EmptyLog(t *testing.T) {
 // the helpers correctly report the position/term of the last one — using
 // Raft's 1-indexed convention (first real entry lands at index 1).
 func TestLastLogIndex_WithEntries(t *testing.T) {
-	s := NewState(1)
+	s := NewState(1, nil)
 	s.Log = append(s.Log, LogEntry{Term: 1, Index: 1, Command: "PUT x=1"})
 	s.Log = append(s.Log, LogEntry{Term: 2, Index: 2, Command: "PUT y=2"})
 

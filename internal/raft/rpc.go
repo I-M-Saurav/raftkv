@@ -36,57 +36,23 @@ func NewRPCServer(state *State) *RPCServer {
 }
 
 // RequestVote handles an incoming RequestVote RPC from a candidate.
-//
 // Figure 2: RequestVote RPC receiver implementation.
-//
-// TODO: The actual vote-granting logic (term checks, votedFor checks, log
-// up-to-dateness per §5.4.1) belongs in election.go's HandleRequestVote().
-// This stub always denies the vote — it will be replaced once election.go
-// is implemented. The handler's final shape will be:
-//
-//	s.mu.Lock()
-//	defer s.mu.Unlock()
-//	resp := HandleRequestVote(s.state, req)
-//	return resp, nil
+// Delegates to HandleRequestVote in election.go for the actual Raft logic.
+// The state mutex is acquired here so that HandleRequestVote can assume it's held.
 func (s *RPCServer) RequestVote(ctx context.Context, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
 	s.state.Lock()
 	defer s.state.Unlock()
-
-	log.Printf("[Node %d] received RequestVote from candidate %d (term=%d) — STUB: denying",
-		s.state.NodeID, req.CandidateId, req.Term)
-
-	// Temporary stub: always deny. Replaced in election.go integration.
-	return &raftpb.RequestVoteResponse{
-		Term:        int64(s.state.CurrentTerm),
-		VoteGranted: false,
-	}, nil
+	return HandleRequestVote(s.state, req), nil
 }
 
 // AppendEntries handles an incoming AppendEntries RPC from the leader.
-//
 // Figure 2: AppendEntries RPC receiver implementation.
-//
-// TODO: The actual heartbeat/log-replication logic belongs in election.go
-// (heartbeat timer reset, term checks) and later in replication.go (Phase 4
-// log matching). This stub always rejects — it will be replaced once
-// election.go is implemented. The handler's final shape will be:
-//
-//	s.mu.Lock()
-//	defer s.mu.Unlock()
-//	resp := HandleAppendEntries(s.state, req)
-//	return resp, nil
+// Delegates to HandleAppendEntries in election.go for the actual Raft logic.
+// The state mutex is acquired here so that HandleAppendEntries can assume it's held.
 func (s *RPCServer) AppendEntries(ctx context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	s.state.Lock()
 	defer s.state.Unlock()
-
-	log.Printf("[Node %d] received AppendEntries from leader %d (term=%d, entries=%d) — STUB: rejecting",
-		s.state.NodeID, req.LeaderId, req.Term, len(req.Entries))
-
-	// Temporary stub: always reject. Replaced in election.go integration.
-	return &raftpb.AppendEntriesResponse{
-		Term:    int64(s.state.CurrentTerm),
-		Success: false,
-	}, nil
+	return HandleAppendEntries(s.state, req), nil
 }
 
 // StartGRPCServer creates a gRPC server, registers the RaftService, and begins

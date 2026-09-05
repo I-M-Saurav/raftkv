@@ -1,6 +1,10 @@
 package raft
 
-import "sync"
+import (
+	"sync"
+
+	"raftkv/internal/config"
+)
 
 // NodeState represents which of the 3 roles (§5.1) this node currently plays.
 type NodeState int
@@ -62,6 +66,19 @@ type State struct {
 	// --- Local bookkeeping (not part of Figure 2 directly, but needed) ---
 	CurrentState NodeState // Follower / Candidate / Leader
 	NodeID       int       // this node's own ID
+
+	// --- Election timer plumbing (used by election.go's RunElectionTimer) ---
+	// ResetElectionTimerCh signals the election timer goroutine to restart with
+	// a fresh random timeout. Sent on (non-blocking) when: a valid heartbeat
+	// arrives, this node grants a vote, or this node starts a new election.
+	ResetElectionTimerCh chan struct{}
+	// StopCh is closed once at shutdown to terminate the election timer goroutine.
+	StopCh chan struct{}
+
+	// --- Cluster membership ---
+	// Peers holds the addresses of all OTHER nodes in the cluster (excluding self).
+	// Used by startElection() to fan out RequestVote RPCs.
+	Peers []config.NodeConfig
 }
 
 // Lock acquires the State mutex. Every goroutine that reads or writes Raft
@@ -88,16 +105,20 @@ func (s *State) LastLogTerm() int {
 // NewState creates a fresh Raft state for a node starting up for the first time.
 // Note: Log[0] is a dummy/sentinel entry so that real entries start at index 1,
 // matching the paper's 1-indexed convention and avoiding off-by-one bugs later.
-func NewState(nodeID int) *State {
+// peers should contain all cluster nodes EXCEPT this node (use config.PeersExcluding).
+func NewState(nodeID int, peers []config.NodeConfig) *State {
 	return &State{
-		CurrentTerm:  0,
-		VotedFor:     -1, // -1 means "haven't voted this term"
-		Log:          make([]LogEntry, 1), // index 0 = dummy entry
-		CommitIndex:  0,
-		LastApplied:  0,
-		NextIndex:    make(map[int]int),
-		MatchIndex:   make(map[int]int),
-		CurrentState: Follower, // §5.1: all servers start as followers
-		NodeID:       nodeID,
+		CurrentTerm:          0,
+		VotedFor:             -1, // -1 means "haven't voted this term"
+		Log:                  make([]LogEntry, 1), // index 0 = dummy entry
+		CommitIndex:          0,
+		LastApplied:          0,
+		NextIndex:            make(map[int]int),
+		MatchIndex:           make(map[int]int),
+		CurrentState:         Follower, // §5.1: all servers start as followers
+		NodeID:               nodeID,
+		ResetElectionTimerCh: make(chan struct{}, 1), // buffered(1) so non-blocking send never drops if timer goroutine is busy
+		StopCh:               make(chan struct{}),
+		Peers:                peers,
 	}
-}
+}
