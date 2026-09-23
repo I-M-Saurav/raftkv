@@ -2,6 +2,7 @@ package raft
 
 import (
 	"log"
+	"time"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -71,4 +72,30 @@ func ProposeCommand(state *State, command []byte) (index int, term int, isLeader
 	}
 
 	return newIndex, state.CurrentTerm, true
+}
+
+
+
+// WaitForApply blocks until the entry at the given index has been applied
+// to the local state machine, or until timeout elapses. Returns true if
+// applied in time, false on timeout.
+//
+// Implementation note: this polls LastApplied at a short interval rather
+// than using a dedicated per-index notification channel. CommitIndexUpdatedCh
+// signals "something advanced" but doesn't carry the specific index; building
+// a per-index waiter map would add real complexity for marginal benefit here.
+// Polling every 5ms is fast enough that the added latency is negligible next
+// to the apply loop's own reaction time.
+func WaitForApply(state *State, index int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		state.Lock()
+		applied := state.LastApplied >= index
+		state.Unlock()
+		if applied {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
 }

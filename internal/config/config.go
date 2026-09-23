@@ -7,11 +7,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// NodeConfig holds the identity and gRPC address of a single Raft node.
+// NodeConfig holds the identity and addresses of a single Raft node.
 // ID is int64 to match the protobuf RPC schema (candidate_id, leader_id are int64).
 type NodeConfig struct {
-	ID      int64  `yaml:"id"`
-	Address string `yaml:"address"` // host:port for gRPC, NOT the HTTP client port
+	ID          int64  `yaml:"id"`
+	Address     string `yaml:"address"`      // host:port for gRPC (Raft RPCs), NOT the HTTP client port
+	HTTPAddress string `yaml:"http_address"` // host:port for the client-facing HTTP REST API
 }
 
 // ClusterConfig holds the full list of nodes that form the Raft cluster.
@@ -51,4 +52,16 @@ func (c *ClusterConfig) PeersExcluding(selfID int64) []NodeConfig {
 		}
 	}
 	return peers
+}
+
+// NodeByID returns the NodeConfig for the given node ID (Raft + HTTP
+// addresses). Used by the HTTP layer to look up the current leader's HTTP
+// address so it can forward a client write there.
+func (c *ClusterConfig) NodeByID(id int64) (NodeConfig, bool) {
+	for _, n := range c.Nodes {
+		if n.ID == id {
+			return n, true
+		}
+	}
+	return NodeConfig{}, false
 }

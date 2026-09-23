@@ -11,56 +11,37 @@ import (
 )
 
 func main() {
-	// ── Command-line flags ──────────────────────────────────────────────
-	nodeID := flag.Int("id", 0, "This node's unique ID (must match an entry in cluster.yaml)")
+	id := flag.Int64("id", 0, "this node's unique ID (must match cluster.yaml)")
 	raftAddr := flag.String("raft-addr", "", "gRPC listen address for Raft RPCs (e.g. localhost:9001)")
-	httpAddr := flag.String("http-addr", ":8080", "HTTP listen address for client-facing REST API")
-	configPath := flag.String("config", "config/cluster.yaml", "Path to cluster configuration YAML file")
+	httpAddr := flag.String("http-addr", ":8080", "HTTP listen address for the client-facing KV API")
+	configPath := flag.String("config", "config/cluster.yaml", "path to cluster.yaml")
 	flag.Parse()
 
-	if *nodeID == 0 {
-		log.Fatal("--id is required (must be a positive integer matching cluster.yaml)")
-	}
-	if *raftAddr == "" {
-		log.Fatal("--raft-addr is required (e.g. localhost:9001)")
+	if *id == 0 || *raftAddr == "" {
+		log.Fatalf("--id and --raft-addr are required")
 	}
 
-	// ── Load cluster configuration ──────────────────────────────────────
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	peers := cfg.PeersExcluding(int64(*nodeID))
-	log.Printf("[Node %d] loaded config: %d total nodes, %d peers", *nodeID, len(cfg.Nodes), len(peers))
+	peers := cfg.PeersExcluding(*id)
+	log.Printf("[Node %d] loaded config: %d total nodes, %d peers", *id, len(cfg.Nodes), len(peers))
 
-	// ── Initialize KV store (state machine) ────────────────────────────
-	// The store is created before Raft so it can be passed to NewRaftNode.
-	// The apply loop (started inside node.Start()) will apply committed
-	// log entries to this store. The HTTP server also uses it for reads.
+	state := raft.NewState(int(*id), peers)
 	store := kvstore.NewStore()
 
-	// ── Initialize Raft ─────────────────────────────────────────────────
-	state := raft.NewState(*nodeID, peers)
-	node, err := raft.NewRaftNode(state, *raftAddr, store)
+	raftNode, err := raft.NewRaftNode(state, *raftAddr, store)
 	if err != nil {
-		log.Fatalf("[Node %d] failed to initialize Raft: %v", *nodeID, err)
+		log.Fatalf("[Node %d] failed to create Raft node: %v", *id, err)
 	}
-	defer node.Close()
-	node.Start() // launches gRPC server, election timer, supervisor, and apply loop goroutines
+	raftNode.Start()
+	log.Printf("[Node %d] Raft started (raft-addr=%s)", *id, *raftAddr)
 
-	log.Printf("[Node %d] Raft started (raft-addr=%s)", *nodeID, *raftAddr)
-
-	// ── Start HTTP server (blocks) ──────────────────────────────────────
-	// TODO(Phase 5): The HTTP server currently writes directly to the local
-	// KV store, bypassing Raft consensus entirely. In Phase 5, writes will
-	// be routed through Raft so that all nodes agree on the order of
-	// operations. Non-leader nodes will forward writes to the leader.
-	// For now this is fine — HTTP is just a placeholder for local testing.
-	httpServer := server.NewHTTPServer(store)
-
-	log.Printf("[Node %d] HTTP server starting on %s", *nodeID, *httpAddr)
+	httpServer := server.NewHTTPServer(store, state, cfg)
+	log.Printf("[Node %d] HTTP server starting on %s", *id, *httpAddr)
 	if err := httpServer.Start(*httpAddr); err != nil {
-		log.Fatalf("[Node %d] HTTP server failed: %v", *nodeID, err)
+		log.Fatalf("[Node %d] HTTP server failed: %v", *id, err)
 	}
 }

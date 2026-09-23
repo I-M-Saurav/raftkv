@@ -292,6 +292,7 @@ func sendHeartbeats(state *State, term int, peerPool *PeerConnections, stopCh <-
 							nodeID, peerID, resp.Term, state.CurrentTerm)
 						state.CurrentTerm = int(resp.Term)
 						state.VotedFor = -1
+						state.LeaderID = -1
 						state.CurrentState = Follower
 						if wasLeader {
 							notifyStepDown(state)

@@ -149,6 +149,7 @@ func startElection(state *State, peerPool *PeerConnections) {
 	// §5.2 step 2: "Vote for itself"
 	state.VotedFor = state.NodeID
 	state.CurrentState = Candidate
+	state.LeaderID = -1 // presumed leader is gone; unknown until a new one confirms itself
 
 	// Capture log state for the RequestVote RPC while we hold the lock.
 	// These values are used in the §5.4.1 "up-to-date" check by receivers.
@@ -248,6 +249,7 @@ func startElection(state *State, peerPool *PeerConnections) {
 					nodeID, result.peerID, result.term, state.CurrentTerm)
 				state.CurrentTerm = int(result.term)
 				state.VotedFor = -1
+				state.LeaderID = -1
 				state.CurrentState = Follower
 				if wasLeader {
 					notifyStepDown(state)
@@ -299,7 +301,7 @@ func startElection(state *State, peerPool *PeerConnections) {
 // BecameLeaderCh so that raft.go's supervisor can spawn the heartbeat goroutine.
 func becomeLeader(state *State) {
 	state.CurrentState = Leader
-
+	state.LeaderID = state.NodeID // we are now the leader
 	// Figure 2, "Volatile state on leaders (Reinitialized after election)":
 	// "nextIndex[]: initialized to leader last log index + 1"
 	// "matchIndex[]: initialized to 0"
@@ -365,6 +367,7 @@ func HandleRequestVote(state *State, req *raftpb.RequestVoteRequest) *raftpb.Req
 			state.NodeID, req.CandidateId, req.Term, state.CurrentTerm)
 		state.CurrentTerm = int(req.Term)
 		state.VotedFor = -1
+		state.LeaderID = -1
 		state.CurrentState = Follower
 		if wasLeader {
 			notifyStepDown(state)
@@ -485,6 +488,7 @@ func HandleAppendEntries(state *State, req *raftpb.AppendEntriesRequest) *raftpb
 			state.NodeID, req.LeaderId, req.Term, state.CurrentTerm)
 		state.CurrentTerm = int(req.Term)
 		state.VotedFor = -1
+		state.LeaderID = -1
 		state.CurrentState = Follower
 		if wasLeader {
 			notifyStepDown(state)
@@ -500,6 +504,11 @@ func HandleAppendEntries(state *State, req *raftpb.AppendEntriesRequest) *raftpb
 	// Valid heartbeat from the current leader — reset the election timer
 	// so we don't start a spurious election while the leader is alive.
 	resetElectionTimer(state)
+
+	// Record the current leader so the HTTP layer (Phase 5) can forward
+	// client writes here. Set on every valid heartbeat/append, regardless
+	// of whether the log-consistency check below ultimately succeeds.
+	state.LeaderID = int(req.LeaderId)
 
 	// ── Figure 2, AppendEntries RPC, rules 2-5: ─────────────────────────
 	//

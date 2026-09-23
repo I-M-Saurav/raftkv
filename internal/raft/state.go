@@ -66,6 +66,11 @@ type State struct {
 	// --- Local bookkeeping (not part of Figure 2 directly, but needed) ---
 	CurrentState NodeState // Follower / Candidate / Leader
 	NodeID       int       // this node's own ID
+	// LeaderID is the NodeID of the node this follower currently believes is
+	// the leader, learned from the most recent valid AppendEntries. -1 means
+	// unknown (e.g. mid-election, or just started up). Used by the HTTP layer
+	// to forward client writes to the correct node.
+	LeaderID int
 
 	// --- Election timer plumbing (used by election.go's RunElectionTimer) ---
 	// ResetElectionTimerCh signals the election timer goroutine to restart with
@@ -133,6 +138,7 @@ func (s *State) LastLogTerm() int {
 // peers should contain all cluster nodes EXCEPT this node (use config.PeersExcluding).
 func NewState(nodeID int, peers []config.NodeConfig) *State {
 	return &State{
+		LeaderID: -1, // unknown until we hear from a leader
 		CurrentTerm:          0,
 		VotedFor:             -1, // -1 means "haven't voted this term"
 		Log:                  make([]LogEntry, 1), // index 0 = dummy entry
@@ -150,4 +156,4 @@ func NewState(nodeID int, peers []config.NodeConfig) *State {
 		CommitIndexUpdatedCh: make(chan struct{}, 1),
 		Peers:                peers,
 	}
-}
+}
