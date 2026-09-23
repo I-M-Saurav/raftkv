@@ -499,14 +499,35 @@ func HandleAppendEntries(state *State, req *raftpb.AppendEntriesRequest) *raftpb
 	// so we don't start a spurious election while the leader is alive.
 	resetElectionTimer(state)
 
-	log.Printf("[Node %d] accepted heartbeat from leader %d (term=%d)",
-		state.NodeID, req.LeaderId, state.CurrentTerm)
+	log.Printf("[Node %d] accepted AppendEntries from leader %d (term=%d, entries=%d)",
+		state.NodeID, req.LeaderId, state.CurrentTerm, len(req.Entries))
 
-	// Phase 3: heartbeat only — always return success for valid-term RPCs.
-	// Phase 4 will add log consistency checks (prevLogIndex/prevLogTerm)
-	// and actual entry appending here.
+	// ── TODO(phase4-substep2): TEMPORARY / UNSAFE — naive log append ────
+	// This unconditionally appends all received entries to the follower's
+	// log WITHOUT any prevLogIndex/prevLogTerm consistency checking and
+	// WITHOUT truncating conflicting entries. This is WRONG for correctness
+	// but sufficient for Phase 4, sub-step 1 (leader-side replication) to
+	// compile and run without crashing. Sub-step 2 will replace this with
+	// the full Figure 2 AppendEntries receiver rules 2-5:
+	//   2. Reply false if log doesn't contain entry at prevLogIndex with prevLogTerm
+	//   3. Delete conflicting entries and all that follow
+	//   4. Append any new entries not already in the log
+	//   5. Update commitIndex = min(leaderCommit, index of last new entry)
+	if len(req.Entries) > 0 {
+		for _, protoEntry := range req.Entries {
+			state.Log = append(state.Log, LogEntry{
+				Term:    int(protoEntry.Term),
+				Index:   int(protoEntry.Index),
+				Command: protoEntry.Command, // []byte from proto, stored as interface{}
+			})
+		}
+		log.Printf("[Node %d] naively appended %d entries (lastIndex=%d) — TODO: consistency check in sub-step 2",
+			state.NodeID, len(req.Entries), state.LastLogIndex())
+	}
+
 	return &raftpb.AppendEntriesResponse{
 		Term:    int64(state.CurrentTerm),
 		Success: true,
 	}
 }
+
