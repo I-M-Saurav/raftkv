@@ -32,6 +32,11 @@ import (
 // The "issues AppendEntries RPCs" part is handled by firing
 // TriggerReplicationCh, which wakes the heartbeat loop immediately rather
 // than waiting up to 50ms for the next periodic tick.
+//
+// Command encoding: the `command` parameter is an opaque []byte. Callers
+// should use EncodeCommand(CommandPayload{...}) from apply.go to produce
+// these bytes. The apply loop uses DecodeCommand() to interpret them when
+// executing committed entries against the KV store.
 func ProposeCommand(state *State, command []byte) (index int, term int, isLeader bool) {
 	state.Lock()
 	defer state.Unlock()

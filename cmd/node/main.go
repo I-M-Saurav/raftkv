@@ -34,14 +34,20 @@ func main() {
 	peers := cfg.PeersExcluding(int64(*nodeID))
 	log.Printf("[Node %d] loaded config: %d total nodes, %d peers", *nodeID, len(cfg.Nodes), len(peers))
 
+	// ── Initialize KV store (state machine) ────────────────────────────
+	// The store is created before Raft so it can be passed to NewRaftNode.
+	// The apply loop (started inside node.Start()) will apply committed
+	// log entries to this store. The HTTP server also uses it for reads.
+	store := kvstore.NewStore()
+
 	// ── Initialize Raft ─────────────────────────────────────────────────
 	state := raft.NewState(*nodeID, peers)
-	node, err := raft.NewRaftNode(state, *raftAddr)
+	node, err := raft.NewRaftNode(state, *raftAddr, store)
 	if err != nil {
 		log.Fatalf("[Node %d] failed to initialize Raft: %v", *nodeID, err)
 	}
 	defer node.Close()
-	node.Start() // launches gRPC server, election timer, and supervisor goroutines
+	node.Start() // launches gRPC server, election timer, supervisor, and apply loop goroutines
 
 	log.Printf("[Node %d] Raft started (raft-addr=%s)", *nodeID, *raftAddr)
 
@@ -51,7 +57,6 @@ func main() {
 	// be routed through Raft so that all nodes agree on the order of
 	// operations. Non-leader nodes will forward writes to the leader.
 	// For now this is fine — HTTP is just a placeholder for local testing.
-	store := kvstore.NewStore()
 	httpServer := server.NewHTTPServer(store)
 
 	log.Printf("[Node %d] HTTP server starting on %s", *nodeID, *httpAddr)

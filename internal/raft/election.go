@@ -440,15 +440,17 @@ func HandleRequestVote(state *State, req *raftpb.RequestVoteRequest) *raftpb.Req
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AppendEntries RPC Handler — Heartbeat-Only Stub (Phase 3)
+// AppendEntries RPC Handler — Full Figure 2 Receiver (Phase 4)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// HandleAppendEntries implements a minimal receiver for the AppendEntries RPC,
-// sufficient for Phase 3's heartbeat-only requirements. It handles:
+// HandleAppendEntries implements the receiver side of the AppendEntries RPC,
+// following Figure 2 of the Raft paper exactly (rules 1-5). It handles:
 //   - Term checking and step-down (Figure 2, "Rules for Servers")
 //   - Election timer reset (so followers don't time out while leader is alive)
-//
-// It does NOT handle actual log entry appending — that's Phase 4 (replication).
+//   - PrevLogIndex/PrevLogTerm consistency check (rule 2)
+//   - Conflict truncation (rule 3)
+//   - Idempotent append of new entries (rule 4)
+//   - Follower commitIndex advancement (rule 5)
 //
 // CALLER MUST HOLD state.Lock() — same convention as HandleRequestVote.
 func HandleAppendEntries(state *State, req *raftpb.AppendEntriesRequest) *raftpb.AppendEntriesResponse {
@@ -499,30 +501,141 @@ func HandleAppendEntries(state *State, req *raftpb.AppendEntriesRequest) *raftpb
 	// so we don't start a spurious election while the leader is alive.
 	resetElectionTimer(state)
 
-	log.Printf("[Node %d] accepted AppendEntries from leader %d (term=%d, entries=%d)",
-		state.NodeID, req.LeaderId, state.CurrentTerm, len(req.Entries))
+	// ── Figure 2, AppendEntries RPC, rules 2-5: ─────────────────────────
+	//
+	// WHY THE ORDER OF RULES 2-5 MATTERS:
+	//
+	// Rule 2 MUST be checked before rules 3/4. Rule 2 establishes that we
+	// have a valid "anchor point" — an entry at prevLogIndex whose term
+	// matches prevLogTerm — confirming that the leader and follower agree
+	// on the log up to (and including) that point. Without this anchor,
+	// rules 3/4 would operate on a log that may have gaps or completely
+	// divergent entries. Concretely: if prevLogIndex=5 and our log only
+	// goes to index 2, rule 3 would try to access index 6+ (out of bounds
+	// or nonsensical), and rule 4 would append entries at index 6 with
+	// indices 3-5 missing — creating a gap that violates the contiguous
+	// log invariant.
+	//
+	// Rules 3/4 MUST happen before rule 5. Rule 5 advances commitIndex,
+	// which tells the apply loop "these entries are safe to execute."
+	// If we advanced commitIndex before fixing conflicts (rule 3) or
+	// appending entries (rule 4), the apply loop could try to execute
+	// entries that haven't been written yet, or execute conflicting entries
+	// that should have been truncated.
 
-	// ── TODO(phase4-substep2): TEMPORARY / UNSAFE — naive log append ────
-	// This unconditionally appends all received entries to the follower's
-	// log WITHOUT any prevLogIndex/prevLogTerm consistency checking and
-	// WITHOUT truncating conflicting entries. This is WRONG for correctness
-	// but sufficient for Phase 4, sub-step 1 (leader-side replication) to
-	// compile and run without crashing. Sub-step 2 will replace this with
-	// the full Figure 2 AppendEntries receiver rules 2-5:
-	//   2. Reply false if log doesn't contain entry at prevLogIndex with prevLogTerm
-	//   3. Delete conflicting entries and all that follow
-	//   4. Append any new entries not already in the log
-	//   5. Update commitIndex = min(leaderCommit, index of last new entry)
-	if len(req.Entries) > 0 {
-		for _, protoEntry := range req.Entries {
-			state.Log = append(state.Log, LogEntry{
-				Term:    int(protoEntry.Term),
-				Index:   int(protoEntry.Index),
-				Command: protoEntry.Command, // []byte from proto, stored as interface{}
-			})
+	prevLogIndex := int(req.PrevLogIndex)
+	prevLogTerm := int(req.PrevLogTerm)
+
+	// ── Rule 2: "Reply false if log doesn't contain an entry at ──────────
+	//     prevLogIndex whose term matches prevLogTerm" (§5.3)
+	//
+	// This is the consistency check. The leader sends prevLogIndex/prevLogTerm
+	// so we can verify our log matches the leader's up to the point just
+	// before the new entries. If it doesn't match, we reject — the leader
+	// will decrement nextIndex and retry with an earlier starting point,
+	// walking backward until it finds the point where we agree.
+	//
+	// Special case: prevLogIndex == 0 means "sending from the very beginning
+	// of the log" (the sentinel entry). This always matches — there's
+	// nothing to check.
+	if prevLogIndex > 0 {
+		// Check 1: Do we even HAVE an entry at prevLogIndex?
+		if prevLogIndex >= len(state.Log) {
+			log.Printf("[Node %d] AppendEntries rule 2 FAIL: log too short (prevLogIndex=%d, logLen=%d) — rejecting",
+				state.NodeID, prevLogIndex, len(state.Log)-1)
+			return &raftpb.AppendEntriesResponse{
+				Term:    int64(state.CurrentTerm),
+				Success: false,
+			}
 		}
-		log.Printf("[Node %d] naively appended %d entries (lastIndex=%d) — TODO: consistency check in sub-step 2",
-			state.NodeID, len(req.Entries), state.LastLogIndex())
+		// Check 2: Does the entry at prevLogIndex have the expected term?
+		if state.Log[prevLogIndex].Term != prevLogTerm {
+			log.Printf("[Node %d] AppendEntries rule 2 FAIL: term mismatch at prevLogIndex=%d (ours=%d, leader=%d) — rejecting",
+				state.NodeID, prevLogIndex, state.Log[prevLogIndex].Term, prevLogTerm)
+			return &raftpb.AppendEntriesResponse{
+				Term:    int64(state.CurrentTerm),
+				Success: false,
+			}
+		}
+	}
+
+	// ── Rules 3 & 4: Conflict truncation + idempotent append ────────────
+	//
+	// Rule 3: "If an existing entry conflicts with a new one (same index
+	// but different terms), delete the existing entry and all that follow it."
+	//
+	// Rule 4: "Append any new entries not already in the log."
+	//
+	// We process these together in a single pass. For each incoming entry:
+	//   - If our log already has an entry at that index with the SAME term,
+	//     it's already correctly present (idempotent — skip it, rule 4).
+	//   - If our log has an entry at that index with a DIFFERENT term,
+	//     truncate at that point (rule 3), then append the rest.
+	//   - If our log doesn't reach that index, just append (rule 4).
+	if len(req.Entries) > 0 {
+		for i, protoEntry := range req.Entries {
+			entryIndex := int(protoEntry.Index)
+			entryTerm := int(protoEntry.Term)
+
+			if entryIndex < len(state.Log) {
+				// We have an entry at this index — check for conflict.
+				if state.Log[entryIndex].Term == entryTerm {
+					// Same term — entry already present and correct. Skip it.
+					// (Rule 4: "Append any new entries not already in the log")
+					continue
+				}
+				// Different term — CONFLICT. Truncate here and everything after.
+				// (Rule 3: "delete the existing entry and all that follow it")
+				log.Printf("[Node %d] AppendEntries rule 3: conflict at index %d (ours term=%d, leader term=%d) — truncating log from %d entries to %d",
+					state.NodeID, entryIndex, state.Log[entryIndex].Term, entryTerm, len(state.Log)-1, entryIndex-1)
+				state.Log = state.Log[:entryIndex]
+			}
+
+			// Append this entry and all remaining entries from the request.
+			// Once we've either found a conflict (truncated) or reached the
+			// end of our log, ALL subsequent entries from the request are new
+			// and need to be appended.
+			for _, remaining := range req.Entries[i:] {
+				state.Log = append(state.Log, LogEntry{
+					Term:    int(remaining.Term),
+					Index:   int(remaining.Index),
+					Command: remaining.Command, // []byte from proto, stored as interface{}
+				})
+			}
+			log.Printf("[Node %d] AppendEntries rules 3/4: appended %d entries (lastIndex now %d)",
+				state.NodeID, len(req.Entries)-i, state.LastLogIndex())
+			break // we've handled all entries from index i onward
+		}
+	}
+
+	// ── Rule 5: "If leaderCommit > commitIndex, set commitIndex = ───────
+	//     min(leaderCommit, index of last new entry)" (§5.3)
+	//
+	// This is how followers learn that entries are safe to apply. The leader
+	// piggybacks its commitIndex on every AppendEntries RPC. If the leader
+	// has committed further than we knew, we advance our own commitIndex.
+	//
+	// The min() with "index of last new entry" is a safety bound: we can't
+	// commit entries we don't have yet. If the leader is ahead of us in the
+	// log, we only commit up to what we've actually received.
+	leaderCommit := int(req.LeaderCommit)
+	if leaderCommit > state.CommitIndex {
+		lastNewEntryIndex := state.LastLogIndex()
+		newCommitIndex := leaderCommit
+		if lastNewEntryIndex < newCommitIndex {
+			newCommitIndex = lastNewEntryIndex
+		}
+		if newCommitIndex > state.CommitIndex {
+			oldCommitIndex := state.CommitIndex
+			state.CommitIndex = newCommitIndex
+			log.Printf("[Node %d] AppendEntries rule 5: commitIndex %d → %d (leaderCommit=%d)",
+				state.NodeID, oldCommitIndex, newCommitIndex, leaderCommit)
+
+			// Signal the apply loop that new entries are ready to apply.
+			// §5.3: "once a follower learns that a log entry is committed,
+			// it applies the entry to its local state machine"
+			notifyCommitIndexUpdated(state)
+		}
 	}
 
 	return &raftpb.AppendEntriesResponse{

@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"raftkv/internal/kvstore"
 	"raftkv/internal/raftpb"
 )
 
@@ -17,14 +18,15 @@ import (
 // point that main.go calls to start a Raft node.
 type RaftNode struct {
 	State      *State
-	listenAddr string    // gRPC listen address (e.g. "localhost:9001")
+	listenAddr string              // gRPC listen address (e.g. "localhost:9001")
 	rpcServer  *RPCServer
 	peerPool   *PeerConnections
+	store      *kvstore.Store      // the KV state machine that committed entries are applied to
 }
 
 // NewRaftNode constructs a RaftNode. It creates the RPCServer internally and
 // eagerly initializes persistent gRPC client connections to all peers.
-func NewRaftNode(state *State, listenAddr string) (*RaftNode, error) {
+func NewRaftNode(state *State, listenAddr string, store *kvstore.Store) (*RaftNode, error) {
 	peerPool, err := NewPeerConnections(state.Peers)
 	if err != nil {
 		return nil, err
@@ -34,6 +36,7 @@ func NewRaftNode(state *State, listenAddr string) (*RaftNode, error) {
 		listenAddr: listenAddr,
 		rpcServer:  NewRPCServer(state),
 		peerPool:   peerPool,
+		store:      store,
 	}, nil
 }
 
@@ -44,6 +47,8 @@ func NewRaftNode(state *State, listenAddr string) (*RaftNode, error) {
 //  2. Election timer — starts elections when no heartbeat is received (§5.2)
 //  3. Leadership supervisor — spawns/stops the heartbeat goroutine based on
 //     leadership transitions (BecameLeaderCh / StepDownCh)
+//  4. Apply loop — watches commitIndex and applies committed entries to the
+//     KV store (§5.3)
 //
 // Start itself does NOT block — it launches goroutines and returns immediately.
 // The caller should block on something else (e.g. the HTTP server, or a signal).
@@ -60,6 +65,11 @@ func (rn *RaftNode) Start() {
 
 	// 3. Start the leadership supervisor goroutine.
 	go rn.runSupervisor()
+
+	// 4. Start the apply loop — runs on every node (leader and followers).
+	// §5.3: "once a follower learns that a log entry is committed, it
+	// applies the entry to its local state machine"
+	go RunApplyLoop(rn.State, rn.store)
 }
 
 // Close terminates all persistent gRPC peer connections.
@@ -326,6 +336,12 @@ func sendHeartbeats(state *State, term int, peerPool *PeerConnections, stopCh <-
 							state.NextIndex[int(peerID)] = lastSentIndex + 1
 						}
 					}
+
+					// Figure 2, leader commit rule (§5.3 / §5.4.2):
+					// After updating matchIndex, check if any new entries
+					// can be committed. advanceCommitIndex considers ALL
+					// peers' matchIndex values, not just this one.
+					advanceCommitIndex(state, term)
 				} else {
 					// "If AppendEntries fails because of log inconsistency:
 					// decrement nextIndex and retry" (Figure 2, §5.3)
@@ -350,10 +366,6 @@ func sendHeartbeats(state *State, term int, peerPool *PeerConnections, stopCh <-
 					}
 				}
 				state.Unlock()
-
-				// NOTE: commitIndex advancement is NOT implemented here.
-				// That's Phase 4, sub-step 2 — it depends on matchIndex
-				// tracking working first.
 
 
 			}(peer.Address, peer.ID)

@@ -92,6 +92,13 @@ type State struct {
 	// triggers immediate replication rather than waiting for the next tick.
 	// Buffered(1) so the send never blocks even if the loop is busy.
 	TriggerReplicationCh chan struct{}
+	// CommitIndexUpdatedCh is signalled (non-blocking) whenever commitIndex
+	// advances — either on a follower (via rule 5 in HandleAppendEntries) or
+	// on the leader (via advanceCommitIndex after matchIndex updates). The
+	// apply loop (apply.go) selects on this channel to wake up and apply
+	// newly committed entries to the KV store.
+	// Buffered(1) so the signal is never lost even if the apply loop is busy.
+	CommitIndexUpdatedCh chan struct{}
 
 	// --- Cluster membership ---
 	// Peers holds the addresses of all OTHER nodes in the cluster (excluding self).
@@ -140,6 +147,7 @@ func NewState(nodeID int, peers []config.NodeConfig) *State {
 		BecameLeaderCh:       make(chan struct{}, 1),
 		StepDownCh:           make(chan struct{}, 1),
 		TriggerReplicationCh: make(chan struct{}, 1),
+		CommitIndexUpdatedCh: make(chan struct{}, 1),
 		Peers:                peers,
 	}
 }
