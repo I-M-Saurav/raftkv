@@ -40,11 +40,53 @@ func NewHTTPServer(store *kvstore.Store, state *raft.State, cfg *config.ClusterC
 	}
 }
 
+// withCORS wraps a handler to allow cross-origin requests from the
+// dashboard (Phase 8), which runs on a different origin (e.g.
+// localhost:3000) than the node's own HTTP API. Without this, browsers
+// block the dashboard's fetch() calls per the same-origin policy.
+func withCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next(w, r)
+	}
+}
+
+
+
+// handleCluster returns the full list of nodes in the cluster (ID + HTTP
+// address), sourced from cluster.yaml. Used by the dashboard (Phase 8) to
+// discover cluster topology dynamically — it doesn't need any node count
+// hardcoded, so the dashboard scales to any cluster size (3, 5, 10+ nodes)
+// without code changes.
+func (h *HTTPServer) handleCluster(w http.ResponseWriter, r *http.Request) {
+	type clusterNode struct {
+		ID          int64  `json:"id"`
+		HTTPAddress string `json:"http_address"`
+	}
+	nodes := make([]clusterNode, 0, len(h.cfg.Nodes))
+	for _, n := range h.cfg.Nodes {
+		nodes = append(nodes, clusterNode{ID: n.ID, HTTPAddress: n.HTTPAddress})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(struct {
+		Nodes []clusterNode `json:"nodes"`
+	}{Nodes: nodes})
+}
+
+
 // Start registers routes and begins listening on addr (e.g. ":8080").
 func (h *HTTPServer) Start(addr string) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/kv/", h.handleKV)
-	mux.HandleFunc("/status", h.handleStatus)
+	mux.HandleFunc("/kv/", withCORS(h.handleKV))
+	mux.HandleFunc("/status", withCORS(h.handleStatus))
+	mux.HandleFunc("/cluster", withCORS(h.handleCluster))
 
 	log.Printf("HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
@@ -193,7 +235,16 @@ func (h *HTTPServer) forwardToLeader(w http.ResponseWriter, r *http.Request, lea
 	}
 	defer resp.Body.Close()
 
-	for k, values := range resp.Header {
+		for k, values := range resp.Header {
+		// Skip CORS headers from the leader's response — this node's own
+		// withCORS wrapper has already set them once on w. Copying the
+		// leader's copy on top via Add() would result in TWO
+		// Access-Control-Allow-Origin headers in the final response, which
+		// browsers reject outright (fails with a generic "Failed to fetch"),
+		// even though the underlying write succeeded.
+		if strings.HasPrefix(k, "Access-Control-") {
+			continue
+		}
 		for _, v := range values {
 			w.Header().Add(k, v)
 		}

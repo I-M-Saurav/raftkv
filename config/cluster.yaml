@@ -1,4 +1,4 @@
-nodes:
+﻿nodes:
   - id: 1
     address: "localhost:9001"
     http_address: "localhost:8081"
@@ -8,3 +8,9 @@ nodes:
   - id: 3
     address: "localhost:9003"
     http_address: "localhost:8083"
+  - id: 4
+    address: "localhost:9004"
+    http_address: "localhost:8084"
+  - id: 5
+    address: "localhost:9005"
+    http_address: "localhost:8085"
