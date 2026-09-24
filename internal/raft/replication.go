@@ -59,6 +59,9 @@ func ProposeCommand(state *State, command []byte) (index int, term int, isLeader
 		Command: command,
 	}
 	state.Log = append(state.Log, newEntry)
+	// PERSIST: the leader's own append must be durable before we tell
+	// followers about it (and before this returns to the HTTP layer).
+	state.persistLog()
 
 	log.Printf("[Node %d] ProposeCommand: appended entry at index %d, term %d (logLen=%d)",
 		state.NodeID, newIndex, state.CurrentTerm, len(state.Log)-1)

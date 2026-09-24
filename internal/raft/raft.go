@@ -294,6 +294,7 @@ func sendHeartbeats(state *State, term int, peerPool *PeerConnections, stopCh <-
 						state.VotedFor = -1
 						state.LeaderID = -1
 						state.CurrentState = Follower
+						state.persistTermVote() // PERSIST before signaling step-down
 						if wasLeader {
 							notifyStepDown(state)
 						}
