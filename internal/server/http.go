@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"encoding/json"
 
 	"raftkv/internal/config"
 	"raftkv/internal/kvstore"
@@ -43,6 +44,7 @@ func NewHTTPServer(store *kvstore.Store, state *raft.State, cfg *config.ClusterC
 func (h *HTTPServer) Start(addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/kv/", h.handleKV)
+	mux.HandleFunc("/status", h.handleStatus)
 
 	log.Printf("HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
@@ -198,4 +200,32 @@ func (h *HTTPServer) forwardToLeader(w http.ResponseWriter, r *http.Request, lea
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+
+// handleStatus returns this node's current Raft status as JSON — role, term,
+// believed leader, and commit/apply progress. Used by automated tests
+// (Phase 7) and the optional dashboard (Phase 8) to observe cluster state
+// without parsing log output.
+func (h *HTTPServer) handleStatus(w http.ResponseWriter, r *http.Request) {
+	h.state.Lock()
+	status := struct {
+		NodeID      int    `json:"node_id"`
+		State       string `json:"state"`
+		Term        int    `json:"term"`
+		LeaderID    int    `json:"leader_id"`
+		CommitIndex int    `json:"commit_index"`
+		LastApplied int    `json:"last_applied"`
+	}{
+		NodeID:      h.state.NodeID,
+		State:       h.state.CurrentState.String(),
+		Term:        h.state.CurrentTerm,
+		LeaderID:    h.state.LeaderID,
+		CommitIndex: h.state.CommitIndex,
+		LastApplied: h.state.LastApplied,
+	}
+	h.state.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
 }
